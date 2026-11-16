@@ -147,9 +147,64 @@
             }
         });
 
+        // Cek dukungan browser: showDirectoryPicker hanya ada di Chrome / Edge desktop
+        // (Brave mematikannya secara default, Firefox & Safari tidak punya).
+        function pickerSupported() {
+            if (typeof window.showDirectoryPicker === 'function') return true;
+            const isBrave = !!(navigator.brave);
+            const msg = isBrave
+                ? "Brave mematikan fitur pilih folder. Buka brave://flags/#file-system-access-api, set ke Enabled, lalu restart Brave. Atau pakai Google Chrome / Microsoft Edge."
+                : !window.isSecureContext
+                    ? "Halaman harus dibuka lewat https:// supaya bisa memilih folder."
+                    : (window.self !== window.top)
+                        ? "Fitur pilih folder tidak bisa jalan di dalam iframe / in-app browser. Buka halaman ini langsung di Chrome atau Edge."
+                        : "Browser ini belum mendukung fitur pilih folder. Pakai Google Chrome atau Microsoft Edge versi desktop (Windows/Mac).";
+            addLog(msg, "error");
+            alert(msg);
+            return false;
+        }
+
+        // Terjemahkan error picker ke pesan yang jelas
+        function handlePickerError(err, label) {
+            if (err && err.name === 'AbortError') {
+                addLog(`Pemilihan ${label} dibatalkan.`);
+                return;
+            }
+            let msg;
+            if (err && err.name === 'SecurityError') {
+                msg = `Folder ${label} ditolak oleh browser. Ini terjadi kalau memilih folder sistem atau root drive (mis. C:\\, D:\\, folder user, Program Files). Pindahkan foto ke dalam sub-folder biasa (mis. D:\\Wedding\\RAW) lalu pilih sub-folder itu.`;
+            } else if (err && err.name === 'NotAllowedError') {
+                msg = `Izin akses folder ${label} tidak diberikan. Klik tombol lagi lalu pilih "Lihat file" / "Izinkan" / "Edit file" saat browser bertanya.`;
+            } else {
+                msg = `Gagal memilih folder ${label}: ${err && err.message ? err.message : err}`;
+            }
+            console.error(err);
+            addLog(msg, "error");
+            alert(msg);
+        }
+
+        // Hitung isi folder sumber supaya kelihatan apakah file RAW terbaca
+        const RAW_EXTS = ['CR2','CR3','CRW','NEF','NRW','ARW','SRF','SR2','RAF','ORF','RW2','PEF','DNG','3FR','IIQ','RWL','SRW','X3F','ERF','KDC','MRW','MOS','MEF'];
+        async function scanSummary(dirHandle, stats, depth = 0) {
+            for await (const entry of dirHandle.values()) {
+                if (entry.kind === 'file') {
+                    stats.total++;
+                    const dot = entry.name.lastIndexOf('.');
+                    const ext = dot !== -1 ? entry.name.substring(dot + 1).toUpperCase() : '(tanpa ekstensi)';
+                    stats.ext[ext] = (stats.ext[ext] || 0) + 1;
+                    if (RAW_EXTS.includes(ext)) stats.raw++;
+                    if (stats.samples.length < 3) stats.samples.push(entry.name);
+                } else if (entry.kind === 'directory' && depth < 10) {
+                    stats.folders++;
+                    await scanSummary(entry, stats, depth + 1);
+                }
+            }
+        }
+
         async function selectSource() {
+            if (!pickerSupported()) return;
             try {
-                sourceHandle = await window.showDirectoryPicker();
+                sourceHandle = await window.showDirectoryPicker({ id: 'rawSource', mode: 'read' });
                 const pathEl = document.getElementById('sourcePath');
                 pathEl.classList.remove('hidden');
                 pathEl.querySelector('span').innerText = sourceHandle.name;
@@ -157,13 +212,35 @@
                 document.getElementById('btnSource').classList.replace('text-slate-700', 'text-green-700');
                 document.getElementById('btnSource').classList.replace('border-slate-200', 'border-green-300');
             } catch (err) {
-                console.log("Pemilihan folder sumber dibatalkan.", err);
+                handlePickerError(err, 'sumber');
+                return;
+            }
+
+            // Info isi folder: memastikan file RAW memang terbaca oleh sistem
+            try {
+                addLog(`Memeriksa isi folder "${sourceHandle.name}"...`);
+                const stats = { total: 0, raw: 0, folders: 0, ext: {}, samples: [] };
+                await scanSummary(sourceHandle, stats);
+                const extText = Object.entries(stats.ext).sort((a, b) => b[1] - a[1])
+                    .map(([e, n]) => `${e}: ${n}`).join(', ');
+                if (stats.total === 0) {
+                    addLog(`Folder "${sourceHandle.name}" kosong (0 file, ${stats.folders} sub-folder). Pastikan memilih folder yang benar, dan kalau foto ada di OneDrive/Google Drive for Desktop, set foldernya "Always keep on this device" dulu.`, "error");
+                } else if (stats.raw === 0) {
+                    addLog(`Terbaca ${stats.total} file di ${stats.folders} sub-folder, tapi tidak ada file RAW. Ekstensi yang ditemukan: ${extText}`, "warning");
+                } else {
+                    addLog(`Terbaca ${stats.raw} file RAW dari total ${stats.total} file (${stats.folders} sub-folder). Ekstensi: ${extText}`, "success");
+                    addLog(`Contoh nama file: ${stats.samples.join(', ')} → pastikan list klien memakai kode yang sama.`);
+                }
+            } catch (err) {
+                console.error(err);
+                addLog(`Tidak bisa membaca isi folder: ${err.message}`, "error");
             }
         }
 
         async function selectDest() {
+            if (!pickerSupported()) return;
             try {
-                destHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+                destHandle = await window.showDirectoryPicker({ id: 'rawDest', mode: 'readwrite' });
                 const pathEl = document.getElementById('destPath');
                 pathEl.classList.remove('hidden');
                 pathEl.querySelector('span').innerText = destHandle.name;
@@ -171,7 +248,7 @@
                 document.getElementById('btnDest').classList.replace('text-slate-700', 'text-green-700');
                 document.getElementById('btnDest').classList.replace('border-slate-200', 'border-green-300');
             } catch (err) {
-                console.log("Pemilihan folder tujuan dibatalkan.", err);
+                handlePickerError(err, 'tujuan');
             }
         }
 
